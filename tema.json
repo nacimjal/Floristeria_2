@@ -1,0 +1,59 @@
+{
+  "tema_activo": "azul",
+  "temas": {
+    "claro": {
+      "fondo": "#FDF8F6",
+      "superficie": "#FFFFFF",
+      "texto": "#3B2F2F",
+      "texto_secundario": "#8C7B76",
+      "principal": "#C2185B",
+      "principal_hover": "#A01449",
+      "texto_boton": "#FFFFFF",
+      "encabezado": "#2E7D5B",
+      "texto_encabezado": "#FFFFFF",
+      "fila_alterna": "#FBEFEA",
+      "seleccion": "#F8BBD0",
+      "borde": "#D9BFB7",
+      "pestana": "#F1E3DE",
+      "deshabilitado_fondo": "#D9C9C4",
+      "deshabilitado_texto": "#8C7B76",
+      "margen_editable": "#FFF4CC"
+    },
+    "oscuro": {
+      "fondo": "#1E1B1C",
+      "superficie": "#2A2627",
+      "texto": "#F2E9E6",
+      "texto_secundario": "#A89B97",
+      "principal": "#E0508A",
+      "principal_hover": "#C23D74",
+      "texto_boton": "#FFFFFF",
+      "encabezado": "#2E7D5B",
+      "texto_encabezado": "#FFFFFF",
+      "fila_alterna": "#322D2E",
+      "seleccion": "#6A2B45",
+      "borde": "#4A4244",
+      "pestana": "#2F2A2B",
+      "deshabilitado_fondo": "#4A4244",
+      "deshabilitado_texto": "#8C7F7B",
+      "margen_editable": "#4A4020"
+    },
+    "azul": {
+      "fondo": "#F4F8FC",
+      "superficie": "#FFFFFF",
+      "texto": "#1F2D3D",
+      "texto_secundario": "#6B7C8F",
+      "principal": "#1E6FD9",
+      "principal_hover": "#1859B0",
+      "texto_boton": "#FFFFFF",
+      "encabezado": "#2C5282",
+      "texto_encabezado": "#FFFFFF",
+      "fila_alterna": "#EAF1FA",
+      "seleccion": "#BBD6F7",
+      "borde": "#C5D3E3",
+      "pestana": "#E3ECF7",
+      "deshabilitado_fondo": "#CBD5E1",
+      "deshabilitado_texto": "#7B8794",
+      "margen_editable": "#FFF4CC"
+    }
+  }
+}

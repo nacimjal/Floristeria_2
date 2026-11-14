@@ -1,0 +1,70 @@
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+5-11-2026:6:00pm
+
+
+Ajustes 
+> Pestaña [Insumos]
+Sección Tabla
+1. Ocultar columna Cantidad, no es necesario que el insumo tenga cantidad en esta pestaña.
+2. Ocultar la columna Precio Total, no es necesario ver el precio total en esta tabla.
+3. Las actualizaciones, o filas actualizadas se deberán ver en la parte superior y no inferior.
+4. Deberá tener un paginado y cantidad de filas por vista. Siendo el estándar 25 filas por pagina.
+5. Se deberá agregar la columna N°
+
+Funcionalidad Nuevo y Editar
+1. Debe contar con campo obligatorios para poder guardar la información. Estos serán los campos obligatorios, Nombre, Categoría, Cantidad y Precio Unitario.
+2. Si voy a editar un insumo, me debe aparecer un mensaje de alerta antes de guardar la edición, para asegurar el no cambiar por error.
+
+> Pestaña [Productos]
+Sección Tabla
+1. Deberá tener un paginado y cantidad de filas por vista. Siendo el estándar 25 filas por pagina.
+2. Se deberá agregar la columna N°
+
+Funcionalidad Nuevo y Editar
+1. Campos obligatorios, Nombre, Categoria
+2. Retirar el campo precio de venta, dado que no es editable, 
+3. Deberá tener el campo porcentaje editable en está sección y con ella se visualizará el precio de venta.
+4. Ocultar la columna ID Insumo, y reemplazarla por columna N°
+5. Si voy a editar un Producto, me debe aparecer un mensaje de alerta antes de guardar la edición, para asegurar el no cambiar por error.
+
+
+> Pestaña [Historico de Compras]
+1. Creamos la siguiente pestaña, Histórico de compras, esta pestaña deberá ayudarnos a subir las compras que hemos realizado por cada insumo a lo largo del tiempo, deberá contar con las siguientes columnas
+2. Columnas: 
+- [Nombre] Debe ser un buscador, dado que el insumo ya está creado
+- [Categoría] Se debe autocompletar
+- [Fecha de Compra] calendar editable
+- [Precio de Costo] numérico editable, moneda a 5 decimales
+
+
+Ajustes Generales, todos los desplegables deberán tener buscador incorporado.
+El orden de las pestañas serán las siguientes, Histórico de Compras, Insumos y Productos
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+5-11-2026:8:30pm
+
+
+Ajustes 
+
+Pestaña [Histórico de Compras]
+1. Agreguemos un buscador por fecha de compra
+2. La columna Precio de Costo, deberá tener 2 decimales.
+3. Las columnas deberán tener ordenamiento por columna.
+4. Agreguemos una Descripción que Indique Total de Compra: está deberá sumar todos los valores de la columna Precio de Costo. Y deberá ser dinámico; es decir, se deberá actualizar por cada filtro aplicado.
+
+Funcionalidad [Nuevo Insumo y Editar Insumo]
+1. Retirar campo Cantidad, dado que son individuales.
+2. Retirar campo Precio Total.
+3. A la columna Precio Unitario, agreguemos el simbolo de soles. (S/)
+
+
+Pestaña [Productos]
+1. En la primera tabla, agreguemos una Columna botón radiobuttom, para poder seleccionar la fila.
+2. Agreguemos una funcionalidad llamada "Copiar Producto" esta funcionalidad deberá estar relacionada a la selección del radioButtom de cada fila, de esta manera podré copiar todos los atributos del Producto realizado y al nombre deberemos agregarle al final del nombre la cadena de "Copiado"
+
+Creemos una Pestaña de Reportes, la cual inicialmente estará en blanco solo con la leyenda "Acá se generará el reporte"
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+5-11-2026: hh:mm pm
+
+
