@@ -228,6 +228,29 @@ def resumen_final(titulo, nombre, cambios):
     return f"Sin cambios: «{nombre}»", ["No modificaste ningún dato."]
 
 
+class PopupImagen(QDialog):
+    def __init__(self, ruta_imagen, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Vista previa de la imagen")
+        self.setFixedSize(720, 1220)
+        
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        
+        lbl = QLabel()
+        lbl.setAlignment(Qt.AlignCenter)
+        
+        if ruta_imagen and (db.BASE / ruta_imagen).exists():
+            pix = QPixmap(str(db.BASE / ruta_imagen)).scaled(
+                700, 1200, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            lbl.setPixmap(pix)
+        else:
+            lbl.setText("No hay imagen disponible")
+            
+        lay.addWidget(lbl)
+
+
 class Toast(QFrame):
     DURACION_MS = 20000
 
@@ -588,7 +611,15 @@ class InsumoDialog(QDialog):
         self.guardado_id = None
         self.resumen = None
         self.setWindowTitle("Editar insumo" if insumo else "Nuevo insumo")
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(520)
+
+        self.sel_maestro = ComboBuscable("Seleccionar insumo del maestro…")
+        self.sel_maestro.addItem("— Seleccionar del catálogo maestro —", None)
+        self._maestros_dict = {}
+        for m in db.listar_insumos(con, orden="nombre"):
+            self.sel_maestro.addItem(f"{m['nombre']} ({m['categoria']})", m["id"])
+            self._maestros_dict[m["id"]] = m
+        self.sel_maestro.currentIndexChanged.connect(self._al_elegir_maestro)
 
         self.nombre = QLineEdit()
         self.nombre.setPlaceholderText("Ej. Rosa")
@@ -601,6 +632,7 @@ class InsumoDialog(QDialog):
         fila_cat = QHBoxLayout()
         fila_cat.addWidget(self.cat, 1)
         fila_cat.addWidget(b_cat)
+
         self.cant = CampoNumero(0, "Ej. 24")
         self.cant.setMaximumWidth(160)
         self.total = CampoNumero(2, "Ej. 25.00")
@@ -620,14 +652,15 @@ class InsumoDialog(QDialog):
         fila_unit.addStretch()
 
         form = QFormLayout()
+        form.addRow("Insumo Maestro", self.sel_maestro)
         form.addRow("Nombre del insumo *", self.nombre)
         form.addRow("Descripción", self.desc)
         form.addRow("Categoría *", fila_cat)
         form.addRow("Cantidad *", self.cant)
         form.addRow("Precio total *", fila_total)
         form.addRow("Precio unitario (calculado)", fila_unit)
-        nota = QLabel("* Campos obligatorios.   Precio unitario = Precio total ÷ Cantidad "
-                      "(ej. paquete de 24 rosas a S/ 25).")
+        nota = QLabel("* Campos obligatorios.   El nombre y la categoría se obtienen del Maestro de Insumos. "
+                      "Precio unitario = Precio total ÷ Cantidad.")
         nota.setObjectName("nota")
         nota.setWordWrap(True)
         botones = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -655,11 +688,22 @@ class InsumoDialog(QDialog):
             self.total.poner(round(cant * insumo["precio_unitario"], 2))
             self._orig = (self.cant.text(), self.total.text())
             self._cat_orig = self.cat.currentText()
+            idx = self.sel_maestro.findData(insumo["id"])
+            if idx >= 0:
+                self.sel_maestro.setCurrentIndex(idx)
         self.cant.textChanged.connect(self.recalcular)
         self.total.textChanged.connect(self.recalcular)
         self.recalcular()
         if insumo:
             self.seg.activar()
+
+    def _al_elegir_maestro(self, idx):
+        iid = self.sel_maestro.currentData()
+        if iid is not None and iid in self._maestros_dict:
+            m = self._maestros_dict[iid]
+            self.nombre.setText(m["nombre"])
+            self.desc.setPlainText(m["descripcion"])
+            llenar_categorias(self.cat, self.con, "insumo", m["categoria_id"])
 
     def nueva_categoria(self):
         txt, ok = QInputDialog.getText(self, "Nueva categoría", "Nombre:")
@@ -697,9 +741,12 @@ class InsumoDialog(QDialog):
         if self.insumo and self._orig == (self.cant.text(), self.total.text()):
             t = self.insumo["precio_unitario"] * c
         nombre, desc = self.nombre.text().strip(), self.desc.toPlainText().strip()
+        
+        insumo_id = self.sel_maestro.currentData() if self.sel_maestro.currentData() is not None else (self.insumo["id"] if self.insumo else None)
+        
         try:
             self.guardado_id = db.guardar_insumo(
-                self.con, nombre, desc, self.cat.currentData(), c, t, self.insumo["id"] if self.insumo else None)
+                self.con, nombre, desc, self.cat.currentData(), c, t, insumo_id)
         except ValueError as e:
             return aviso(self, str(e))
         if self.insumo:
@@ -716,8 +763,9 @@ class InsumoDialog(QDialog):
 
 class InsumosTab(OrdenPorCabecera, QWidget):
     cambio = Signal()
-    COLS = ["N°", "Nombre", "Descripción", "Categoría", "Precio unitario"]
-    ORDEN_COL = {1: "nombre", 2: "descripcion", 3: "categoria", 4: "precio_unitario"}
+    COLS = ["Sel.", "N°", "Nombre", "Descripción", "Categoría", "Precio unitario"]
+    C_CHK, C_NUM = 0, 1
+    ORDEN_COL = {2: "nombre", 3: "descripcion", 4: "categoria", 5: "precio_unitario"}
 
     def __init__(self, con):
         super().__init__()
@@ -725,23 +773,25 @@ class InsumosTab(OrdenPorCabecera, QWidget):
         self.buscar = QLineEdit()
         self.buscar.setPlaceholderText("Buscar por nombre o descripción…")
         self.filtro = ComboBuscable("Filtrar por categoría…")
-        b_nuevo, b_edit, b_del, b_cats = (QPushButton(t) for t in
-                                          ("Nuevo", "Editar", "Eliminar", "Categorías…"))
+        b_nuevo, b_edit, b_del, b_del_masivo, b_cats = (QPushButton(t) for t in
+                                                          ("Nuevo", "Editar", "Eliminar", "Eliminar seleccionados", "Categorías…"))
         b_nuevo.clicked.connect(self.nuevo)
         b_edit.clicked.connect(self.editar)
         b_del.clicked.connect(self.eliminar)
+        b_del_masivo.clicked.connect(self.eliminar_masivo)
         b_cats.clicked.connect(self.categorias)
         barra = QHBoxLayout()
         barra.addWidget(self.buscar, 2)
         barra.addWidget(self.filtro, 1)
-        for b in (b_nuevo, b_edit, b_del, b_cats):
+        for b in (b_nuevo, b_edit, b_del, b_del_masivo, b_cats):
             barra.addWidget(b)
 
         self.tabla = crear_tabla(self.COLS)
         h = self.tabla.horizontalHeader()
-        h.setSectionResizeMode(1, QHeaderView.Stretch)
-        h.setSectionResizeMode(2, QHeaderView.Interactive)
-        self.tabla.setColumnWidth(2, 200)
+        h.setSectionResizeMode(2, QHeaderView.Stretch)
+        h.setSectionResizeMode(3, QHeaderView.Interactive)
+        self.tabla.setColumnWidth(self.C_CHK, 46)
+        self.tabla.setColumnWidth(3, 200)
         self._init_orden()
         self.tabla.doubleClicked.connect(lambda _: self.editar())
         self.pag = Paginador()
@@ -767,7 +817,7 @@ class InsumosTab(OrdenPorCabecera, QWidget):
         self.filtro.blockSignals(False)
 
     def refrescar(self, reiniciar=False, seleccionar=None):
-        sel = seleccionar if seleccionar is not None else id_seleccionado(self.tabla)
+        sel = seleccionar if seleccionar is not None else id_seleccionado(self.tabla, self.C_NUM)
         if reiniciar:
             self.pag.reiniciar()
         texto, cat = self.buscar.text().strip(), self.filtro.currentData()
@@ -775,6 +825,14 @@ class InsumosTab(OrdenPorCabecera, QWidget):
         filas = db.listar_insumos(self.con, texto, cat, self.orden, self.asc, self.pag.limite, self.pag.offset)
         self.tabla.setRowCount(len(filas))
         for r, i in enumerate(filas):
+            chk = QCheckBox()
+            cont = QWidget()
+            cl = QHBoxLayout(cont)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.setAlignment(Qt.AlignCenter)
+            cl.addWidget(chk)
+            self.tabla.setCellWidget(r, self.C_CHK, cont)
+
             desc = i["descripcion"]
             celdas = [
                 celda(self.pag.offset + r + 1, True, dato=i["id"]),
@@ -783,10 +841,10 @@ class InsumosTab(OrdenPorCabecera, QWidget):
                 celda(i["categoria"]),
                 celda(fmt_unit_sol(i["precio_unitario"]), True),
             ]
-            for c, it in enumerate(celdas):
+            for c, it in enumerate(celdas, start=1):
                 self.tabla.setItem(r, c, it)
         if sel is not None:
-            seleccionar_id(self.tabla, sel)
+            seleccionar_id(self.tabla, sel, self.C_NUM)
 
     def _tras_guardar(self, dlg):
         self.restablecer_orden()
@@ -801,7 +859,7 @@ class InsumosTab(OrdenPorCabecera, QWidget):
             self._tras_guardar(dlg)
 
     def editar(self):
-        iid = id_seleccionado(self.tabla)
+        iid = id_seleccionado(self.tabla, self.C_NUM)
         if iid is None:
             return aviso(self, "Selecciona un insumo.")
         dlg = InsumoDialog(self.con, db.obtener_insumo(self.con, iid), self)
@@ -809,7 +867,7 @@ class InsumosTab(OrdenPorCabecera, QWidget):
             self._tras_guardar(dlg)
 
     def eliminar(self):
-        iid = id_seleccionado(self.tabla)
+        iid = id_seleccionado(self.tabla, self.C_NUM)
         if iid is None:
             return aviso(self, "Selecciona un insumo.")
         if confirmar(self, "¿Eliminar el insumo seleccionado?"):
@@ -819,6 +877,32 @@ class InsumosTab(OrdenPorCabecera, QWidget):
                 return aviso(self, str(e))
             self.refrescar()
             self.cambio.emit()
+
+    def eliminar_masivo(self):
+        ids_a_borrar = []
+        for r in range(self.tabla.rowCount()):
+            cont = self.tabla.cellWidget(r, self.C_CHK)
+            if cont:
+                chk = cont.findChild(QCheckBox)
+                if chk and chk.isChecked():
+                    iid = self.tabla.item(r, self.C_NUM).data(Qt.UserRole)
+                    if iid is not None:
+                        ids_a_borrar.append(iid)
+        
+        if not ids_a_borrar:
+            return aviso(self, "Selecciona al menos un insumo marcando su casilla (Checkbox).")
+        
+        if confirmar(self, f"¿Estás seguro de eliminar los {len(ids_a_borrar)} insumos seleccionados?"):
+            errores = 0
+            for iid in ids_a_borrar:
+                try:
+                    db.eliminar_insumo(self.con, iid)
+                except ValueError:
+                    errores += 1
+            self.refrescar()
+            self.cambio.emit()
+            if errores > 0:
+                aviso(self, f"Se eliminaron algunos insumos, pero {errores} no pudieron eliminarse por estar en uso.")
 
     def categorias(self):
         CategoriasDialog(self.con, self, "insumo").exec()
@@ -866,11 +950,12 @@ class ProductoDialog(QDialog):
         self.activo = QCheckBox("Activo")
         self.activo.setChecked(True)
 
-        # Sección derecha: Imagen del producto (vista previa + botones)
-        self.lbl_preview = QLabel("Sin imagen")
+        self.lbl_preview = QLabel("Sin imagen\n(Clic para ampliar)")
         self.lbl_preview.setFixedSize(115, 115)
         self.lbl_preview.setAlignment(Qt.AlignCenter)
         self.lbl_preview.setStyleSheet("border: 1px dashed #B0B0B0; border-radius: 6px; color: #888;")
+        self.lbl_preview.mousePressEvent = lambda event: self.mostrar_popup_imagen()
+
         self.b_img = QPushButton("Agregar imagen")
         self.b_img.clicked.connect(self.seleccionar_imagen)
         self.b_quitar_img = QPushButton("Quitar")
@@ -885,7 +970,6 @@ class ProductoDialog(QDialog):
         fila_btns_img.addWidget(self.b_quitar_img)
         col_img.addLayout(fila_btns_img)
 
-        # Fila combinada para Margen + Activo a la izquierda e Imagen a la derecha
         caja_inferior_form = QHBoxLayout()
         izq_form = QFormLayout()
         izq_form.addRow("Margen de ganancia", fila_m)
@@ -976,9 +1060,14 @@ class ProductoDialog(QDialog):
                 self.b_quitar_img.setVisible(True)
                 return
         self.lbl_preview.clear()
-        self.lbl_preview.setText("Sin imagen")
+        self.lbl_preview.setText("Sin imagen\n(Clic para ampliar)")
         self.b_img.setText("Agregar imagen")
         self.b_quitar_img.setVisible(False)
+
+    def mostrar_popup_imagen(self):
+        if self.ruta_imagen:
+            dlg = PopupImagen(self.ruta_imagen, self)
+            dlg.exec()
 
     def seleccionar_imagen(self):
         archivo, _ = QFileDialog.getOpenFileName(
@@ -1137,44 +1226,63 @@ class ProductoDialog(QDialog):
         super().accept()
 
 
+class ClickableLabel(QLabel):
+    def __init__(self, ruta_imagen, parent=None):
+        super().__init__(parent)
+        self.ruta_imagen = ruta_imagen
+        if ruta_imagen and (db.BASE / ruta_imagen).exists():
+            pix = QPixmap(str(db.BASE / ruta_imagen)).scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.setPixmap(pix)
+            self.setToolTip("Clic para ampliar imagen")
+        else:
+            self.setText("—")
+            self.setStyleSheet("color: #888;")
+        self.setAlignment(Qt.AlignCenter)
+
+    def mousePressEvent(self, event):
+        if self.ruta_imagen and (db.BASE / self.ruta_imagen).exists():
+            dlg = PopupImagen(self.ruta_imagen, self)
+            dlg.exec()
+
+
 class ProductosTab(QWidget):
     COLS = ["Sel.", "N°", "Nombre", "Descripción", "Categoría", "Cant de Insumos", "Costo",
             "Precio venta", "Ganancia", "Margen", "Activo", "Imagen"]
-    C_RADIO, C_NUM, C_NOMBRE, C_DESC, C_MARGEN, C_ACTIVO, C_IMAGEN = 0, 1, 2, 3, 9, 10, 11
-    DERECHA = (1, 5, 6, 7, 8, 9)
+    C_CHK, C_NUM, C_NOMBRE, C_DESC, C_MARGEN, C_ACTIVO, C_IMAGEN = 0, 1, 2, 3, 9, 10, 11
+    DERECHA = (6, 7, 8, 9, 10)
 
     def __init__(self, con):
         super().__init__()
         self.con = con
-        self.radios, self.grupo = [], None
         self._cargando = False
         self.buscar = QLineEdit()
         self.buscar.setPlaceholderText("Buscar por nombre o descripción…")
         self.filtro = ComboBuscable("Filtrar por categoría…")
-        b_nuevo, b_edit, b_copiar, b_del, b_cats = (QPushButton(t) for t in
-                                                    ("Nuevo", "Editar", "Copiar Producto", "Eliminar", "Categorías…"))
+        b_nuevo, b_edit, b_copiar, b_del, b_del_masivo, b_cats = (QPushButton(t) for t in
+                                                    ("Nuevo", "Editar", "Copiar Producto", "Eliminar", "Eliminar seleccionados", "Categorías…"))
         b_nuevo.clicked.connect(self.nuevo)
         b_edit.clicked.connect(self.editar)
         b_copiar.clicked.connect(self.copiar)
         b_del.clicked.connect(self.eliminar)
+        b_del_masivo.clicked.connect(self.eliminar_masivo)
         b_cats.clicked.connect(self.categorias)
         barra = QHBoxLayout()
         barra.addWidget(self.buscar, 2)
         barra.addWidget(self.filtro, 1)
-        for b in (b_nuevo, b_edit, b_copiar, b_del, b_cats):
+        for b in (b_nuevo, b_edit, b_copiar, b_del, b_del_masivo, b_cats):
             barra.addWidget(b)
 
         self.tabla = crear_tabla(self.COLS)
         self.tabla.setColumnHidden(self.C_ACTIVO, True)
         h = self.tabla.horizontalHeader()
         h.setSectionResizeMode(self.C_DESC, QHeaderView.Stretch)
-        h.setSectionResizeMode(self.C_RADIO, QHeaderView.Fixed)
-        self.tabla.setColumnWidth(self.C_RADIO, 46)
+        h.setSectionResizeMode(self.C_CHK, QHeaderView.Fixed)
+        self.tabla.setColumnWidth(self.C_CHK, 46)
         self.tabla.setColumnWidth(self.C_IMAGEN, 70)
         self.tabla.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.tabla.doubleClicked.connect(self.doble_clic)
         self.tabla.itemChanged.connect(self.al_cambiar_item)
-        self.tabla.itemSelectionChanged.connect(self.al_cambiar_seleccion)
+        self.tabla.itemSelectionChanged.connect(self.mostrar_detalle)
         self.pag = Paginador()
         self.pag.cambiado.connect(self.refrescar)
         self.detalle = crear_tabla(["N°", "Insumo", "Cantidad", "Precio unit.", "Subtotal"])
@@ -1214,24 +1322,6 @@ class ProductosTab(QWidget):
         llenar_categorias(self.filtro, self.con, "producto", actual, "Todas las categorías")
         self.filtro.blockSignals(False)
 
-    def _sincronizar_radio(self):
-        if self.grupo is None:
-            return
-        fila = fila_seleccionada(self.tabla)
-        if 0 <= fila < len(self.radios):
-            self.radios[fila].setChecked(True)
-        else:
-            self.grupo.setExclusive(False)
-            for rb in self.radios:
-                rb.setChecked(False)
-            self.grupo.setExclusive(True)
-
-    def al_cambiar_seleccion(self):
-        if self._cargando:
-            return
-        self._sincronizar_radio()
-        self.mostrar_detalle()
-
     def refrescar(self, reiniciar=False, seleccionar=None):
         sel = seleccionar if seleccionar is not None else id_seleccionado(self.tabla, self.C_NUM)
         if reiniciar:
@@ -1241,23 +1331,15 @@ class ProductosTab(QWidget):
         filas = db.listar_productos(self.con, texto, cat, self.pag.limite, self.pag.offset)
         self._cargando = True
         try:
-            if self.grupo is not None:
-                self.grupo.deleteLater()
-            self.grupo = QButtonGroup(self)
-            self.grupo.setExclusive(True)
-            self.radios = []
             self.tabla.setRowCount(len(filas))
             for r, p in enumerate(filas):
-                rb = QRadioButton()
-                rb.clicked.connect(lambda _=False, fila=r: self.tabla.selectRow(fila))
-                self.grupo.addButton(rb)
-                self.radios.append(rb)
+                chk = QCheckBox()
                 cont = QWidget()
                 cl = QHBoxLayout(cont)
                 cl.setContentsMargins(0, 0, 0, 0)
                 cl.setAlignment(Qt.AlignCenter)
-                cl.addWidget(rb)
-                self.tabla.setCellWidget(r, self.C_RADIO, cont)
+                cl.addWidget(chk)
+                self.tabla.setCellWidget(r, self.C_CHK, cont)
 
                 valores = [self.pag.offset + r + 1, p["nombre"], p["descripcion"].replace("\n", " "),
                            p["categoria"], p["n_insumos"], fmt_money(p["costo"]), fmt_money(p["precio_venta"]),
@@ -1274,15 +1356,8 @@ class ProductosTab(QWidget):
                                       "Precio de venta = costo ÷ (1 − margen).")
                     self.tabla.setItem(r, c, it)
 
-                lbl_miniatura = QLabel()
-                lbl_miniatura.setAlignment(Qt.AlignCenter)
                 ruta = p["imagen"] if "imagen" in p.keys() else None
-                if ruta and (db.BASE / ruta).exists():
-                    pix = QPixmap(str(db.BASE / ruta)).scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    lbl_miniatura.setPixmap(pix)
-                else:
-                    lbl_miniatura.setText("—")
-                    lbl_miniatura.setStyleSheet("color: #888;")
+                lbl_miniatura = ClickableLabel(ruta)
                 
                 cont_img = QWidget()
                 cl_img = QHBoxLayout(cont_img)
@@ -1295,7 +1370,6 @@ class ProductosTab(QWidget):
             self._cargando = False
         if sel is not None:
             seleccionar_id(self.tabla, sel, self.C_NUM)
-        self._sincronizar_radio()
         self.mostrar_detalle()
 
     def doble_clic(self, idx):
@@ -1385,6 +1459,31 @@ class ProductosTab(QWidget):
             except ValueError as e:
                 return aviso(self, str(e))
             self.refrescar()
+
+    def eliminar_masivo(self):
+        ids_a_borrar = []
+        for r in range(self.tabla.rowCount()):
+            cont = self.tabla.cellWidget(r, self.C_CHK)
+            if cont:
+                chk = cont.findChild(QCheckBox)
+                if chk and chk.isChecked():
+                    pid = self.tabla.item(r, self.C_NUM).data(Qt.UserRole)
+                    if pid is not None:
+                        ids_a_borrar.append(pid)
+        
+        if not ids_a_borrar:
+            return aviso(self, "Selecciona al menos un producto marcando su casilla (Checkbox).")
+        
+        if confirmar(self, f"¿Estás seguro de eliminar los {len(ids_a_borrar)} productos seleccionados?"):
+            errores = 0
+            for pid in ids_a_borrar:
+                try:
+                    db.eliminar_producto(self.con, pid)
+                except ValueError:
+                    errores += 1
+            self.refrescar()
+            if errores > 0:
+                aviso(self, f"Se eliminaron algunos productos, pero {errores} no pudieron eliminarse (pueden estar asociados a ventas o recetas activas).")
 
     def categorias(self):
         CategoriasDialog(self.con, self, "producto").exec()
@@ -2380,17 +2479,7 @@ class GastoDialog(QDialog):
             self.guardado_id = db.guardar_gasto(self.con, iso, concepto, self.cat.currentData(), monto,
                                                 notas or None, self.gasto["id"] if self.gasto else None)
         except ValueError as e:
-            aviso(self, str(e))
-            return False
-        self.hubo_cambios = True
-        if self.gasto:
-            g, cambios = self.gasto, []
-            _dif(cambios, "Fecha", g["fecha"], iso, fmt_fecha)
-            _dif(cambios, "Concepto", g["concepto"], concepto, corto)
-            _dif(cambios, "Categoría", g["categoria"], self.cat.currentText())
-            _dif_num(cambios, "Monto", g["monto"], monto, fmt_money, 0.005)
-            _dif(cambios, "Notas", g["notas"].strip(), notas, corto)
-            self.resumen = resumen_final("Gasto modificado", concepto, cambios)
+            return aviso(self, str(e))
         return True
 
     def accept(self):
@@ -3039,6 +3128,7 @@ class MainWindow(QMainWindow):
         guardar_tema_activo(nombre)
         self._repintar()
 
+    def recargar_colores(self): self._repintar()
     def recargar_colores(self):
         self._repintar()
         self._armar_menu()

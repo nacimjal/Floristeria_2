@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS productos (
     precio_venta REAL NOT NULL DEFAULT 0,
     margen REAL NOT NULL DEFAULT 0,
     activo INTEGER NOT NULL DEFAULT 1,
-    imagen TEXT
+    imagen BLOB          -- foto del producto (JPEG/PNG ya reducida); se lee aparte para no cargarla en los listados
 );
 
 CREATE TABLE IF NOT EXISTS receta (
@@ -156,9 +156,9 @@ def _migrar(con):
         if con.execute("SELECT COUNT(*) FROM categorias_gasto").fetchone()[0] == 0:
             con.executemany("INSERT INTO categorias_gasto(nombre) VALUES (?)",
                             [(c,) for c in CATEGORIAS_GASTO_INICIALES])
-    if ver < 5:  # v5: imagen en productos
+    if ver < 5:  # v5: imagen del producto
         if "imagen" not in _columnas(con, "productos"):
-            con.execute("ALTER TABLE productos ADD COLUMN imagen TEXT")
+            con.execute("ALTER TABLE productos ADD COLUMN imagen BLOB")
     con.execute("PRAGMA user_version = 5")
 
 
@@ -175,6 +175,7 @@ def conectar(path=DB_PATH):
 
 
 # ======================= CATEGORÍAS =======================
+# tipo "insumo" -> categorias | tipo "producto" -> categorias_producto
 _TIPOS_CAT = {
     "insumo": ("categorias", "insumos", "insumo(s)"),
     "producto": ("categorias_producto", "productos", "producto(s)"),
@@ -231,7 +232,7 @@ _SEL_INSUMO = """SELECT i.id, i.nombre, i.descripcion, i.categoria_id, COALESCE(
                         ROUND(i.cantidad * i.precio_unitario, 4) AS precio_total, i.actualizado
                  FROM insumos i LEFT JOIN categorias c ON c.id = i.categoria_id"""
 
-_ORDEN_INSUMOS = {
+_ORDEN_INSUMOS = {  # columnas por las que se puede ordenar desde la cabecera
     "nombre": "LOWER(i.nombre)",
     "descripcion": "LOWER(i.descripcion)",
     "categoria": "LOWER(COALESCE(c.nombre,''))",
@@ -242,6 +243,7 @@ _ORDEN_INSUMOS = {
 def _order_insumos(orden, asc):
     if orden in _ORDEN_INSUMOS:
         return f"{_ORDEN_INSUMOS[orden]} {'ASC' if asc else 'DESC'}, i.id"
+    # por defecto: lo creado/editado más recientemente primero
     return "COALESCE(i.actualizado,'') DESC, LOWER(COALESCE(c.nombre,'')), LOWER(i.nombre)"
 
 
@@ -266,6 +268,8 @@ def listar_insumos(con, texto="", categoria_id=None, orden=None, asc=True, limit
 
 
 def listar_insumos_para_producto(con, producto_id=None):
+    """Insumos que se ofrecen al armar un producto: se omiten las categorías ocultas (p. ej. Gasto Operativo),
+    salvo los que ese producto ya usa (para no perderlos al editarlo)."""
     return con.execute(
         _SEL_INSUMO + """ WHERE COALESCE(c.excluir_productos, 0) = 0
                           OR i.id IN (SELECT insumo_id FROM receta WHERE producto_id = ?)
@@ -282,6 +286,8 @@ def obtener_insumo(con, insumo_id):
 
 
 def guardar_insumo(con, nombre, descripcion, categoria_id, cantidad, precio_total, insumo_id=None):
+    """cantidad = unidades que trae el paquete; precio_total = lo que cuesta el paquete.
+    El precio unitario se calcula: precio_total / cantidad (se guarda sin redondear)."""
     nombre = (nombre or "").strip()
     if not nombre:
         raise ValueError("El nombre del insumo no puede estar vacío.")
@@ -331,7 +337,7 @@ def _where_productos(texto, categoria_id):
 def listar_productos(con, texto="", categoria_id=None, limite=None, offset=0):
     w, p = _where_productos(texto, categoria_id)
     q = """SELECT p.id, p.nombre, p.descripcion, p.categoria_id, COALESCE(c.nombre,'') AS categoria,
-                  p.activo, p.imagen, v.margen, v.costo, v.precio_venta, v.ganancia,
+                  p.activo, (p.imagen IS NOT NULL) AS tiene_imagen, v.margen, v.costo, v.precio_venta, v.ganancia,
                   (SELECT COUNT(*) FROM receta r WHERE r.producto_id = p.id) AS n_insumos
            FROM productos p
            JOIN v_costo_producto v ON v.producto_id = p.id
@@ -363,8 +369,12 @@ def _validar_margen(margen):
         raise ValueError("El margen debe estar entre 0 y 99.9 %.")
 
 
-def guardar_producto(con, nombre, descripcion, categoria_id, margen, activo, receta, producto_id=None, imagen=None):
-    """receta: lista de (insumo_id, cantidad)."""
+SIN_CAMBIO = object()  # valor para «no modificar la imagen» en guardar_producto
+
+
+def guardar_producto(con, nombre, descripcion, categoria_id, margen, activo, receta, producto_id=None,
+                     imagen=SIN_CAMBIO):
+    """receta: lista de (insumo_id, cantidad). imagen: bytes = guardarla, None = quitarla, SIN_CAMBIO = dejarla."""
     nombre = (nombre or "").strip()
     if not nombre:
         raise ValueError("El nombre del producto no puede estar vacío.")
@@ -376,16 +386,25 @@ def guardar_producto(con, nombre, descripcion, categoria_id, margen, activo, rec
             if producto_id is None:
                 producto_id = con.execute(
                     "INSERT INTO productos(nombre,descripcion,categoria_id,margen,activo,imagen) VALUES (?,?,?,?,?,?)",
-                    (nombre, descripcion, categoria_id, margen, int(activo), imagen)).lastrowid
+                    (nombre, descripcion, categoria_id, margen, int(activo),
+                     None if imagen is SIN_CAMBIO else imagen)).lastrowid
             else:
-                con.execute("UPDATE productos SET nombre=?,descripcion=?,categoria_id=?,margen=?,activo=?,imagen=? WHERE id=?",
-                            (nombre, descripcion, categoria_id, margen, int(activo), imagen, producto_id))
+                con.execute("UPDATE productos SET nombre=?,descripcion=?,categoria_id=?,margen=?,activo=? WHERE id=?",
+                            (nombre, descripcion, categoria_id, margen, int(activo), producto_id))
                 con.execute("DELETE FROM receta WHERE producto_id=?", (producto_id,))
+                if imagen is not SIN_CAMBIO:
+                    con.execute("UPDATE productos SET imagen=? WHERE id=?", (imagen, producto_id))
             con.executemany("INSERT INTO receta(producto_id,insumo_id,cantidad) VALUES (?,?,?)",
                             [(producto_id, iid, q) for iid, q in receta])
     except sqlite3.IntegrityError:
         raise ValueError(f"Ya existe un producto llamado «{nombre}».")
     return producto_id
+
+
+def obtener_imagen_producto(con, producto_id):
+    """Bytes de la imagen del producto, o None si no tiene."""
+    r = con.execute("SELECT imagen FROM productos WHERE id=?", (producto_id,)).fetchone()
+    return r["imagen"] if r else None
 
 
 def actualizar_margen(con, producto_id, margen):
@@ -397,19 +416,8 @@ def actualizar_margen(con, producto_id, margen):
 def eliminar_producto(con, producto_id):
     if con.execute("SELECT COUNT(*) FROM ventas WHERE producto_id=?", (producto_id,)).fetchone()[0]:
         raise ValueError("No se puede eliminar: tiene ventas registradas. Puedes desactivarlo en su lugar.")
-    prod = obtener_producto(con, producto_id)
-    ruta_img = prod["imagen"] if prod and "imagen" in prod.keys() else None
     with con:
         con.execute("DELETE FROM productos WHERE id=?", (producto_id,))
-    if ruta_img:
-        otros = con.execute("SELECT COUNT(*) FROM productos WHERE imagen=?", (ruta_img,)).fetchone()[0]
-        if otros == 0:
-            archivo = BASE / ruta_img
-            if archivo.exists():
-                try:
-                    archivo.unlink()
-                except OSError:
-                    pass
 
 
 def copiar_producto(con, producto_id):
@@ -421,7 +429,7 @@ def copiar_producto(con, producto_id):
     nombre, n = base, 1
     while con.execute("SELECT 1 FROM productos WHERE nombre=?", (nombre,)).fetchone():
         n += 1
-        nombre = f"{base} {n}"
+        nombre = f"{base} {n}"  # si ya existe una copia: «… Copiado 2», «… Copiado 3»
     with con:
         nuevo = con.execute(
             "INSERT INTO productos(nombre,descripcion,categoria_id,margen,activo,imagen) VALUES (?,?,?,?,?,?)",
@@ -432,6 +440,7 @@ def copiar_producto(con, producto_id):
 
 
 def posicion_producto(con, producto_id, texto="", categoria_id=None):
+    """Posición (desde 0) del producto en el listado con los filtros dados."""
     w, p = _where_productos(texto, categoria_id)
     return con.execute("SELECT COUNT(*) FROM productos p" + w +
                        " AND LOWER(p.nombre) < (SELECT LOWER(nombre) FROM productos WHERE id=?)",
@@ -439,6 +448,7 @@ def posicion_producto(con, producto_id, texto="", categoria_id=None):
 
 
 # ======================= HISTÓRICO DE COMPRAS =======================
+# cantidad = paquetes comprados; precio = costo de cada uno; costo_total = cantidad x precio
 _SEL_COMPRA = """SELECT c.id, c.fecha, c.insumo_id, i.nombre AS insumo, i.descripcion AS descripcion,
                         COALESCE(cat.nombre,'') AS categoria,
                         c.paquetes AS cantidad, c.costo_paquete AS precio,
@@ -447,7 +457,8 @@ _SEL_COMPRA = """SELECT c.id, c.fecha, c.insumo_id, i.nombre AS insumo, i.descri
                  JOIN insumos i ON i.id = c.insumo_id
                  LEFT JOIN categorias cat ON cat.id = i.categoria_id"""
 
-_ORDEN_COMPRAS = {
+
+_ORDEN_COMPRAS = {  # columnas por las que se puede ordenar desde la cabecera
     "nombre": "LOWER(i.nombre)",
     "categoria": "LOWER(COALESCE(cat.nombre,''))",
     "fecha": "c.fecha",
@@ -461,10 +472,11 @@ def _order_compras(orden, asc):
     if orden in _ORDEN_COMPRAS:
         d = "ASC" if asc else "DESC"
         return f"{_ORDEN_COMPRAS[orden]} {d}, c.id {d}"
-    return "c.fecha DESC, c.id DESC"
+    return "c.fecha DESC, c.id DESC"  # por defecto: lo más reciente primero
 
 
 def _where_compras(texto, categoria_id, desde=None, hasta=None):
+    """desde / hasta: fechas ISO (yyyy-mm-dd), ambas incluidas."""
     w, p = " WHERE 1=1", []
     if texto:
         w += " AND (i.nombre LIKE ? OR i.descripcion LIKE ?)"
@@ -500,11 +512,14 @@ def contar_compras(con, texto="", categoria_id=None, desde=None, hasta=None):
 
 
 def total_compras(con, texto="", categoria_id=None, desde=None, hasta=None):
+    """Suma del «Costo Total» (cantidad x precio) de TODAS las compras que cumplen los filtros,
+    no solo las de la página visible."""
     w, p = _where_compras(texto, categoria_id, desde, hasta)
     return con.execute("SELECT COALESCE(SUM(c.paquetes * c.costo_paquete), 0)" + _FROM_COMPRAS + w, p).fetchone()[0]
 
 
 def rango_fechas_compras(con):
+    """(fecha más antigua, fecha más reciente) del histórico; (None, None) si está vacío."""
     r = con.execute("SELECT MIN(fecha), MAX(fecha) FROM compras").fetchone()
     return r[0], r[1]
 
@@ -514,6 +529,7 @@ def obtener_compra(con, compra_id):
 
 
 def guardar_compra(con, insumo_id, fecha_iso, cantidad, precio, compra_id=None):
+    """cantidad = paquetes/unidades compradas; precio = costo de cada una. Costo total = cantidad x precio."""
     if insumo_id is None:
         raise ValueError("Debes elegir un insumo.")
     if not fecha_iso:
@@ -527,6 +543,7 @@ def guardar_compra(con, insumo_id, fecha_iso, cantidad, precio, compra_id=None):
             return con.execute(
                 "INSERT INTO compras(fecha,insumo_id,paquetes,unidades_por_paquete,costo_paquete,precio_costo) "
                 "VALUES (?,?,?,1,?,?)", (fecha_iso, insumo_id, cantidad, precio, precio)).lastrowid
+        # precio_costo (columna interna) se mantiene como precio por unidad suelta
         con.execute("UPDATE compras SET fecha=?, insumo_id=?, paquetes=?, costo_paquete=?, "
                     "precio_costo = ? / COALESCE(NULLIF(unidades_por_paquete, 0), 1) WHERE id=?",
                     (fecha_iso, insumo_id, cantidad, precio, precio, compra_id))
@@ -539,6 +556,8 @@ def eliminar_compra(con, compra_id):
 
 
 # ======================= VENTAS =======================
+# Las ventas NO descuentan insumos. costo_unitario es el costo del producto AL MOMENTO de vender
+# (así el historial no cambia si después suben los insumos).
 _SEL_VENTA = """SELECT v.id, v.fecha, v.producto_id, p.nombre AS producto, COALESCE(c.nombre,'') AS categoria,
                        COALESCE(v.cliente,'') AS cliente, COALESCE(v.notas,'') AS notas,
                        v.cantidad, v.precio_unitario AS precio, v.costo_unitario AS costo,
@@ -562,7 +581,7 @@ def _order_ventas(orden, asc):
     if orden in _ORDEN_VENTAS:
         d = "ASC" if asc else "DESC"
         return f"{_ORDEN_VENTAS[orden]} {d}, v.id {d}"
-    return "v.fecha DESC, v.id DESC"
+    return "v.fecha DESC, v.id DESC"  # por defecto: lo más reciente primero
 
 
 def _where_ventas(texto, categoria_id, desde=None, hasta=None):
@@ -598,6 +617,7 @@ def contar_ventas(con, texto="", categoria_id=None, desde=None, hasta=None):
 
 
 def totales_ventas(con, texto="", categoria_id=None, desde=None, hasta=None):
+    """(total vendido, costo de lo vendido) de TODAS las ventas que cumplen los filtros."""
     w, p = _where_ventas(texto, categoria_id, desde, hasta)
     r = con.execute("SELECT COALESCE(SUM(v.cantidad * v.precio_unitario), 0), "
                     "COALESCE(SUM(v.cantidad * v.costo_unitario), 0)" + _FROM_VENTAS + w, p).fetchone()
@@ -614,6 +634,7 @@ def obtener_venta(con, venta_id):
 
 
 def productos_vendibles(con, incluir_id=None):
+    """Productos activos con su precio y costo actuales (más el de la venta que se edita, aunque esté inactivo)."""
     return con.execute("""SELECT p.id, p.nombre, COALESCE(c.nombre,'') AS categoria, v.costo, v.precio_venta
                           FROM productos p
                           JOIN v_costo_producto v ON v.producto_id = p.id
@@ -669,6 +690,8 @@ def _rango_sql(col, desde, hasta):
 
 
 def resumen_periodos(con, desde=None, hasta=None, agrupar="mes"):
+    """Por período (mes / semana / día): ingresos, costo de lo vendido, ganancia bruta, gasto en insumos,
+    gasto operativo (compras de categorías ocultas en productos) y resultado = ingresos − gastos."""
     wv, pv = _rango_sql("v.fecha", desde, hasta)
     wc, pc = _rango_sql("c.fecha", desde, hasta)
     filas = {}
@@ -687,7 +710,7 @@ def resumen_periodos(con, desde=None, hasta=None, agrupar="mes"):
                              LEFT JOIN categorias cat ON cat.id = i.categoria_id
                              WHERE 1=1 {wc} GROUP BY per""", pc):
         f = fila(r["per"]); f["gasto_insumos"], f["gasto_operativo"] = r["ins"], r["ope"]
-    wg, pg = _rango_sql("g.fecha", desde, hasta)
+    wg, pg = _rango_sql("g.fecha", desde, hasta)  # + lo registrado en la pestaña Gasto Operativo
     for r in con.execute(f"""SELECT {_periodo_sql(agrupar, 'g.fecha')} AS per, SUM(g.monto) AS m
                              FROM gastos g WHERE 1=1 {wg} GROUP BY per""", pg):
         fila(r["per"])["gasto_operativo"] += r["m"]
@@ -701,6 +724,7 @@ def resumen_periodos(con, desde=None, hasta=None, agrupar="mes"):
 
 
 def productos_top(con, desde=None, hasta=None, limite=8):
+    """Productos más rentables (por ganancia) en el rango de fechas."""
     w, p = _rango_sql("v.fecha", desde, hasta)
     return con.execute(f"""SELECT p.nombre, SUM(v.cantidad) AS unidades,
                                   SUM(v.cantidad * v.precio_unitario) AS ingresos,
@@ -711,6 +735,8 @@ def productos_top(con, desde=None, hasta=None, limite=8):
 
 # ======================= MAESTRO DE INSUMOS =======================
 def guardar_insumo_maestro(con, nombre, descripcion, categoria_id, insumo_id=None):
+    """Alta/edición de la identidad del insumo (nombre, descripción, categoría).
+    No toca el costo: un insumo nuevo queda con cantidad 0 y precio 0 hasta definirlo en la pestaña Insumos."""
     nombre = (nombre or "").strip()
     if not nombre:
         raise ValueError("El nombre del insumo no puede estar vacío.")
@@ -738,7 +764,7 @@ def _order_gastos(orden, asc):
     if orden in _ORDEN_GASTOS:
         d = "ASC" if asc else "DESC"
         return f"{_ORDEN_GASTOS[orden]} {d}, g.id {d}"
-    return "g.fecha DESC, g.id DESC"
+    return "g.fecha DESC, g.id DESC"  # por defecto: lo más reciente primero
 
 
 def _where_gastos(texto, categoria_id, desde=None, hasta=None):
@@ -774,6 +800,7 @@ def contar_gastos(con, texto="", categoria_id=None, desde=None, hasta=None):
 
 
 def total_gastos(con, texto="", categoria_id=None, desde=None, hasta=None):
+    """Suma de TODOS los gastos que cumplen los filtros (no solo los de la página visible)."""
     w, p = _where_gastos(texto, categoria_id, desde, hasta)
     return con.execute("SELECT COALESCE(SUM(g.monto), 0) FROM gastos g" + w, p).fetchone()[0]
 

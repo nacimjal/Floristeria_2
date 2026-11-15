@@ -3,12 +3,13 @@ import json
 import math
 import sys
 
-from PySide6.QtCore import QDate, QEvent, QPropertyAnimation, QRegularExpression, Qt, QTimer, Signal
-from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QImage, QPalette, QPixmap,
-                           QRegularExpressionValidator)
+from PySide6.QtCore import (QBuffer, QDate, QEvent, QIODevice, QPointF, QPropertyAnimation, QRectF,
+                            QRegularExpression, Qt, QTimer, Signal)
+from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QIcon, QImage, QPainter, QPalette, QPen,
+                           QPixmap, QPolygonF, QRegularExpressionValidator)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QFrame, QGraphicsOpacityEffect, QComboBox, QCompleter, QDateEdit, QDialog,
-    QDialogButtonBox, QFormLayout, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
     QRadioButton, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -175,6 +176,7 @@ class FechaEdit(_RuedaSoloConFoco, QDateEdit):
 def resaltar(widget, activo):
     """Pinta el campo de color ladrillo (cambio sin guardar) o lo devuelve a su color normal.
     El color sale de la hoja de estilos (propiedad 'cambiado'), así que se puede cambiar en tema.json."""
+    widget = getattr(widget, "resaltable", widget)  # un widget compuesto indica qué parte se pinta
     if bool(widget.property("cambiado")) == activo:
         return
     for w in [widget] + widget.findChildren(QLineEdit):  # los combos y fechas llevan un campo de texto dentro
@@ -194,6 +196,8 @@ def _senal_cambio(w):
         return w.dateChanged
     if isinstance(w, QCheckBox):
         return w.toggled
+    if isinstance(w, SelectorImagen):
+        return w.cambiado
     return None
 
 
@@ -329,6 +333,137 @@ def mostrar_toast(origen, titulo, lineas):
         except RuntimeError:  # ya se había cerrado y eliminado
             pass
     ventana._toast = Toast(ventana, titulo, lineas)
+
+
+IMAGEN_MAX_LADO = 1200  # px. Valor provisional: las reglas de carga (tamaño, formato) se definirán después
+
+
+def preparar_imagen(ruta):
+    """Lee una imagen del disco y la deja lista para guardar en la base de datos: reducida (máx. IMAGEN_MAX_LADO px
+    por lado) y comprimida. Devuelve bytes, o None si el archivo no se pudo leer como imagen."""
+    img = QImage(ruta)
+    if img.isNull():
+        return None
+    if max(img.width(), img.height()) > IMAGEN_MAX_LADO:
+        img = img.scaled(IMAGEN_MAX_LADO, IMAGEN_MAX_LADO, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    buf = QBuffer()
+    buf.open(QIODevice.WriteOnly)
+    if not img.save(buf, "PNG" if img.hasAlphaChannel() else "JPG", 88):
+        return None
+    return bytes(buf.data())
+
+
+def icono_imagen(color, tam=20):
+    """Icono de 'imagen' (marco con sol y montaña) dibujado con el color dado; no depende de archivos."""
+    pm = QPixmap(tam, tam)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    c = QColor(color)
+    lapiz = QPen(c)
+    lapiz.setWidthF(1.6)
+    p.setPen(lapiz)
+    p.setBrush(Qt.NoBrush)
+    p.drawRoundedRect(QRectF(1.5, 3, tam - 3, tam - 6), 2.5, 2.5)
+    p.setBrush(c)
+    p.drawEllipse(QPointF(tam * 0.32, tam * 0.38), 1.8, 1.8)
+    p.drawPolygon(QPolygonF([QPointF(3, tam - 5.5), QPointF(tam * 0.42, tam * 0.5), QPointF(tam * 0.62, tam * 0.7),
+                             QPointF(tam * 0.75, tam * 0.58), QPointF(tam - 3, tam - 5.5)]))
+    p.end()
+    return QIcon(pm)
+
+
+class VisorImagenDialog(QDialog):
+    """Ventana emergente que muestra una imagen, ajustada al tamaño de la pantalla."""
+
+    def __init__(self, datos, titulo, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(titulo)
+        pix = QPixmap()
+        pix.loadFromData(datos)
+        pantalla = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        max_w, max_h = int(pantalla.width() * 0.7), int(pantalla.height() * 0.7)
+        if pix.width() > max_w or pix.height() > max_h:
+            pix = pix.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        lbl = QLabel()
+        lbl.setPixmap(pix)
+        lbl.setAlignment(Qt.AlignCenter)
+        cerrar = QDialogButtonBox(QDialogButtonBox.Close)
+        cerrar.rejected.connect(self.accept)
+        lay = QVBoxLayout(self)
+        lay.addWidget(lbl)
+        lay.addWidget(cerrar)
+
+
+class EtiquetaClicable(QLabel):
+    clicked = Signal()
+
+    def mousePressEvent(self, ev):
+        self.clicked.emit()
+        super().mousePressEvent(ev)
+
+
+class SelectorImagen(QWidget):
+    """Miniatura + botones para subir o quitar la imagen de un producto. La imagen queda guardada dentro de la
+    base de datos. Clic en la miniatura = verla completa."""
+    cambiado = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.datos = None  # bytes de la imagen (JPEG/PNG), o None si no hay
+        self.miniatura = EtiquetaClicable("Sin imagen")
+        self.miniatura.setObjectName("miniatura")
+        self.miniatura.setFixedSize(88, 88)
+        self.miniatura.setAlignment(Qt.AlignCenter)
+        self.miniatura.clicked.connect(self.ver)
+        self.resaltable = self.miniatura  # lo que se pinta de ladrillo cuando la imagen cambia
+        self.b_subir, self.b_quitar = QPushButton("Subir imagen"), QPushButton("Quitar")
+        self.b_subir.clicked.connect(self.subir)
+        self.b_quitar.clicked.connect(self.quitar)
+        col = QVBoxLayout()
+        col.addWidget(self.b_subir)
+        col.addWidget(self.b_quitar)
+        col.addStretch()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(self.miniatura)
+        lay.addLayout(col)
+        self.poner(None)
+
+    def poner(self, datos):
+        self.datos = datos
+        if datos:
+            pix = QPixmap()
+            pix.loadFromData(datos)
+            self.miniatura.setPixmap(pix.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.miniatura.setToolTip("Clic para ver la imagen completa")
+            self.miniatura.setCursor(Qt.PointingHandCursor)
+        else:
+            self.miniatura.clear()
+            self.miniatura.setText("Sin imagen")
+            self.miniatura.setToolTip("")
+            self.miniatura.unsetCursor()
+        self.b_quitar.setEnabled(bool(datos))
+        self.cambiado.emit()
+
+    def subir(self):
+        ruta, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar imagen del producto", "",
+            "Imágenes (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;Todos los archivos (*)")
+        if not ruta:
+            return
+        datos = preparar_imagen(ruta)
+        if datos is None:
+            return aviso(self, "No se pudo abrir ese archivo como imagen.")
+        self.poner(datos)
+
+    def quitar(self):
+        self.poner(None)
+
+    def ver(self):
+        if self.datos:
+            VisorImagenDialog(self.datos, "Imagen del producto", self).exec()
 
 
 class CampoNumero(QLineEdit):
@@ -888,16 +1023,26 @@ class ProductoDialog(QDialog):
         self.margen.setMaximumWidth(120)
         fila_m = QHBoxLayout()
         fila_m.addWidget(self.margen)
-        fila_m.addWidget(QLabel("%  (el precio de venta se calcula con este margen)"))
+        fila_m.addWidget(QLabel("%  (define el precio de venta)"))
         fila_m.addStretch()
         self.activo = QCheckBox("Activo")
         self.activo.setChecked(True)
+        self.imagen = SelectorImagen()
+
+        def etiqueta(texto):  # ancho fijo: las dos zonas del formulario quedan alineadas
+            lbl = QLabel(texto)
+            lbl.setMinimumWidth(175)
+            return lbl
         form = QFormLayout()
-        form.addRow("Nombre del producto *", self.nombre)
-        form.addRow("Descripción", self.desc)
-        form.addRow("Categoría *", fila_cat)
-        form.addRow("Margen de ganancia", fila_m)
-        form.addRow("", self.activo)
+        form.addRow(etiqueta("Nombre del producto *"), self.nombre)
+        form.addRow(etiqueta("Descripción"), self.desc)
+        form.addRow(etiqueta("Categoría *"), fila_cat)
+        form2 = QFormLayout()
+        form2.addRow(etiqueta("Margen de ganancia"), fila_m)
+        form2.addRow(etiqueta(""), self.activo)
+        fila_media = QHBoxLayout()  # margen y "Activo" a la izquierda, imagen a la derecha
+        fila_media.addLayout(form2, 1)
+        fila_media.addWidget(self.imagen, 0, Qt.AlignTop | Qt.AlignRight)
 
         self.tabla = QTableWidget(0, len(self.COLS))
         self.tabla.setHorizontalHeaderLabels(self.COLS)
@@ -932,6 +1077,7 @@ class ProductoDialog(QDialog):
 
         lay = QVBoxLayout(self)
         lay.addLayout(form)
+        lay.addLayout(fila_media)
         lay.addLayout(fila_b)
         lay.addWidget(self.tabla, 1)
         lay.addLayout(fila_t)
@@ -945,14 +1091,18 @@ class ProductoDialog(QDialog):
             (self.cat, lambda: self.cat.currentData()),
             (self.margen, lambda: self.margen.text()),
             (self.activo, lambda: self.activo.isChecked()),
+            (self.imagen, lambda: self.imagen.datos),
         ])
         self._texto_margen0 = ""
+        self._imagen_orig = None
         if producto:
             self.nombre.setText(producto["nombre"])
             self.desc.setPlainText(producto["descripcion"])
             self.margen.poner(round(producto["margen"], 2))
             self._texto_margen0 = self.margen.text()
             self.activo.setChecked(bool(producto["activo"]))
+            self._imagen_orig = producto["imagen"]
+            self.imagen.poner(producto["imagen"])
             self._cat_orig = self.cat.currentText()
             for r in db.obtener_receta(con, producto["id"]):
                 self._receta_orig[r["insumo_id"]] = r["cantidad"]
@@ -1048,6 +1198,13 @@ class ProductoDialog(QDialog):
         _dif(cambios, "Categoría", self._cat_orig, self.cat.currentText())
         _dif_num(cambios, "Margen", p["margen"], m, lambda v: f"{v:.1f}%", 0.005)
         _dif(cambios, "Activo", bool(p["activo"]), activo, lambda v: "Sí" if v else "No")
+        nueva, previa = self.imagen.datos, self._imagen_orig
+        if previa is None and nueva is not None:
+            cambios.append("Imagen: agregada")
+        elif previa is not None and nueva is None:
+            cambios.append("Imagen: quitada")
+        elif previa != nueva:
+            cambios.append("Imagen: reemplazada")
         orig = self._receta_orig
         for iid, q in receta.items():
             nom = self.nombres.get(iid, f"#{iid}")
@@ -1088,9 +1245,12 @@ class ProductoDialog(QDialog):
             if iid is not None and q > 0:
                 receta[iid] = receta.get(iid, 0) + q  # si repiten un insumo, se suman
         nombre, desc = self.nombre.text().strip(), self.desc.toPlainText().strip()
+        imagen = self.imagen.datos
+        if self.producto and imagen == self._imagen_orig:
+            imagen = db.SIN_CAMBIO  # sin cambios: no se vuelve a escribir la imagen
         try:
             db.guardar_producto(self.con, nombre, desc, self.cat.currentData(), m, self.activo.isChecked(),
-                                list(receta.items()), self.producto["id"] if self.producto else None)
+                                list(receta.items()), self.producto["id"] if self.producto else None, imagen)
         except ValueError as e:
             return aviso(self, str(e))
         if self.producto:
@@ -1099,10 +1259,10 @@ class ProductoDialog(QDialog):
 
 
 class ProductosTab(QWidget):
-    COLS = ["Sel.", "N°", "Nombre", "Descripción", "Categoría", "Cant de Insumos", "Costo",
+    COLS = ["Sel.", "N°", "Nombre", "Imagen", "Descripción", "Categoría", "Cant de Insumos", "Costo",
             "Precio venta", "Ganancia", "Margen", "Activo"]
-    C_RADIO, C_NUM, C_NOMBRE, C_DESC, C_MARGEN, C_ACTIVO = 0, 1, 2, 3, 9, 10
-    DERECHA = (1, 5, 6, 7, 8, 9)
+    C_RADIO, C_NUM, C_NOMBRE, C_IMAGEN, C_DESC, C_MARGEN, C_ACTIVO = 0, 1, 2, 3, 4, 10, 11
+    DERECHA = (1, 6, 7, 8, 9, 10)
 
     def __init__(self, con):
         super().__init__()
@@ -1131,10 +1291,13 @@ class ProductosTab(QWidget):
         h.setSectionResizeMode(self.C_DESC, QHeaderView.Stretch)
         h.setSectionResizeMode(self.C_RADIO, QHeaderView.Fixed)
         self.tabla.setColumnWidth(self.C_RADIO, 46)
+        h.setSectionResizeMode(self.C_IMAGEN, QHeaderView.Fixed)
+        self.tabla.setColumnWidth(self.C_IMAGEN, 62)
         self.tabla.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.tabla.doubleClicked.connect(self.doble_clic)
         self.tabla.itemChanged.connect(self.al_cambiar_item)
         self.tabla.itemSelectionChanged.connect(self.al_cambiar_seleccion)
+        self.tabla.cellClicked.connect(self.al_clic_celda)
         self.pag = Paginador()
         self.pag.cambiado.connect(self.refrescar)
         self.detalle = crear_tabla(["N°", "Insumo", "Cantidad", "Precio unit.", "Subtotal"])
@@ -1205,6 +1368,7 @@ class ProductosTab(QWidget):
             self.grupo = QButtonGroup(self)
             self.grupo.setExclusive(True)
             self.radios = []
+            icono = icono_imagen(COL["principal"])
             self.tabla.setRowCount(len(filas))
             for r, p in enumerate(filas):
                 rb = QRadioButton()
@@ -1218,11 +1382,16 @@ class ProductosTab(QWidget):
                 cl.addWidget(rb)
                 self.tabla.setCellWidget(r, self.C_RADIO, cont)
 
-                valores = [self.pag.offset + r + 1, p["nombre"], p["descripcion"].replace("\n", " "),
+                valores = [self.pag.offset + r + 1, p["nombre"], "", p["descripcion"].replace("\n", " "),
                            p["categoria"], p["n_insumos"], fmt_money(p["costo"]), fmt_money(p["precio_venta"]),
                            fmt_money(p["ganancia"]), f"{p['margen']:.1f}%", "Sí" if p["activo"] else "No"]
                 for c, v in enumerate(valores, start=1):
                     it = celda(v, derecha=c in self.DERECHA, dato=p["id"] if c == self.C_NUM else None)
+                    if c == self.C_IMAGEN and p["tiene_imagen"]:  # icono de imagen: clic = verla en una ventana
+                        it.setIcon(icono)
+                        it.setTextAlignment(Qt.AlignCenter)
+                        it.setData(Qt.UserRole + 1, True)
+                        it.setToolTip("Clic para ver la imagen")
                     if c == self.C_MARGEN:  # solo el margen es editable
                         it.setFlags(it.flags() | Qt.ItemIsEditable)
                         it.setBackground(QBrush(QColor(COL["margen_editable"])))
@@ -1239,8 +1408,20 @@ class ProductosTab(QWidget):
         self._sincronizar_radio()
         self.mostrar_detalle()
 
+    def al_clic_celda(self, fila, col):
+        """Clic en el icono de imagen: muestra la imagen del producto en una ventana emergente."""
+        if col != self.C_IMAGEN:
+            return
+        it = self.tabla.item(fila, self.C_IMAGEN)
+        if it is None or not it.data(Qt.UserRole + 1):
+            return
+        pid = self.tabla.item(fila, self.C_NUM).data(Qt.UserRole)
+        datos = db.obtener_imagen_producto(self.con, pid)
+        if datos:
+            VisorImagenDialog(datos, self.tabla.item(fila, self.C_NOMBRE).text(), self).exec()
+
     def doble_clic(self, idx):
-        if idx.column() != self.C_MARGEN:  # en el margen se edita la celda; en el resto se abre el formulario
+        if idx.column() not in (self.C_MARGEN, self.C_IMAGEN):  # en el margen se edita la celda; en el resto se abre el formulario
             self.editar()
 
     def al_cambiar_item(self, item):
@@ -2050,11 +2231,14 @@ def renderizar_rgba(dibujar, ancho, alto, dpr=1.0):
 
 
 class GraficoMpl(QLabel):
-    """Muestra un gráfico de matplotlib como imagen y lo vuelve a dibujar cuando cambia el tamaño."""
+    """Muestra un gráfico de matplotlib como imagen. Solo se dibuja cuando está visible Y algo cambió
+    (datos, colores o tamaño); así abrir la aplicación o volver a la pestaña no lo redibuja sin necesidad."""
 
     def __init__(self, dibujar):
         super().__init__()
         self._dibujar = dibujar  # función(fig) que dibuja el gráfico
+        self._version = 0        # sube cuando cambian los datos o los colores
+        self._dibujado = None    # (ancho, alto, dpr, versión) de lo último que se dibujó
         self.setAlignment(Qt.AlignCenter)
         self.setObjectName("nota")
         self.setMinimumSize(260, 180)
@@ -2064,14 +2248,31 @@ class GraficoMpl(QLabel):
         self._espera.setSingleShot(True)
         self._espera.timeout.connect(self.repintar)
 
+    def actualizar(self):
+        """Avisa que los datos o los colores cambiaron: se redibuja ya si está a la vista, o al mostrarse."""
+        self._version += 1
+        if self.isVisible():
+            self._espera.start(0)
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self._espera.start(40)  # espera a que la ventana termine de acomodarse
+
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        self._espera.start(150)  # espera a que termine de cambiar el tamaño
+        if self.isVisible():
+            self._espera.start(150)  # espera a que termine de cambiar el tamaño
 
     def repintar(self):
+        if not self.isVisible():
+            return
+        ancho, alto, dpr = max(self.width(), 120), max(self.height(), 120), self.devicePixelRatioF()
+        clave = (ancho, alto, dpr, self._version)
+        if clave == self._dibujado:  # nada cambió desde la última vez
+            return
+        self._dibujado = clave
         try:
-            dpr = self.devicePixelRatioF()
-            datos, w, h = renderizar_rgba(self._dibujar, max(self.width(), 120), max(self.height(), 120), dpr)
+            datos, w, h = renderizar_rgba(self._dibujar, ancho, alto, dpr)
             pix = QPixmap.fromImage(QImage(datos, w, h, 4 * w, QImage.Format_RGBA8888).copy())
             pix.setDevicePixelRatio(dpr)
             self.setPixmap(pix)
@@ -2195,6 +2396,12 @@ class ReportesTab(FiltroFechas, QWidget):
         self._fechas_por_defecto()
         self.refrescar()
 
+    def al_cambiar_tema(self):
+        """Con otro tema cambian los colores: los gráficos se redibujan."""
+        if self._mpl:
+            self.grafico_per.actualizar()
+            self.grafico_top.actualizar()
+
     def refrescar(self, reiniciar=False, seleccionar=None):
         desde, hasta = self._desde_hasta()
         agrupar = self.agrupar.currentData() or "mes"
@@ -2233,8 +2440,8 @@ class ReportesTab(FiltroFechas, QWidget):
 
         if self._mpl:
             self._datos, self._top, self._agrupar = datos, top, agrupar
-            self.grafico_per.repintar()
-            self.grafico_top.repintar()
+            self.grafico_per.actualizar()
+            self.grafico_top.actualizar()
 
 
 # ----------------------------- gasto operativo -----------------------------
@@ -2938,6 +3145,9 @@ QFrame#kpi {{ background: {c['superficie']}; border: 1px solid {c['borde']}; bor
 QLabel#kpi_titulo {{ color: {c['texto_secundario']}; font-size: 12px; }}
 QLabel#kpi_valor {{ font-size: 20px; font-weight: bold; }}
 QLabel#kpi_sub {{ color: {c['texto_secundario']}; font-size: 11px; }}
+QLabel#miniatura {{ background: {c['superficie']}; border: 1px dashed {c['borde']}; border-radius: 6px;
+                   color: {c['texto_secundario']}; font-size: 11px; }}
+QLabel#miniatura[cambiado="true"] {{ border: 2px solid {c['cambio']}; }}
 QLabel#estado {{ color: {c['encabezado']}; font-weight: bold; }}
 QTabWidget::pane {{ border: 1px solid {c['borde']}; background: {c['fondo']}; }}
 QTabBar::tab {{ background: {c['pestana']}; padding: 8px 20px; margin-right: 2px;
@@ -2997,9 +3207,23 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(0)
         self.setCentralWidget(self.tabs)
         # al cambiar de pestaña, se recargan los datos (precios, categorías, nombres…)
-        self.tabs.currentChanged.connect(lambda i: self.tabs.widget(i).al_mostrar())
+        self.con = con
+        # al cambiar de pestaña solo se recarga lo que cambió (datos nuevos o cambio de día): el cambio es inmediato
+        estado = self._estado_datos()
+        self._versiones = {self.tabs.widget(i): estado for i in range(self.tabs.count())}
+        self.tabs.currentChanged.connect(self._al_cambiar_pestana)
         self.menu_apariencia = self.menuBar().addMenu("Apariencia")
         self._armar_menu()
+
+    def _estado_datos(self):
+        return (self.con.total_changes, QDate.currentDate().toJulianDay())
+
+    def _al_cambiar_pestana(self, i):
+        w = self.tabs.widget(i)
+        if self._versiones.get(w) == self._estado_datos():
+            return  # nada cambió desde la última vez que se mostró esta pestaña
+        w.al_mostrar()
+        self._versiones[w] = self._estado_datos()
 
     def _armar_menu(self):
         self.menu_apariencia.clear()
@@ -3021,7 +3245,7 @@ class MainWindow(QMainWindow):
     def _repintar(self):
         aplicar_tema()
         self.productos.refrescar()  # recolorea la celda editable del margen
-        self.reportes.al_mostrar()  # redibuja los gráficos con los colores del tema
+        self.reportes.al_cambiar_tema()  # redibuja los gráficos con los colores del tema
 
     def cambiar_tema(self, nombre):
         guardar_tema_activo(nombre)
